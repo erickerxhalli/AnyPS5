@@ -17,6 +17,8 @@ int APS5_VABI scePlayGoInitialize(const PlayGoInitParams*);
 int APS5_VABI scePlayGoOpen(int*, const void*);
 int APS5_VABI scePlayGoClose(int);
 int APS5_VABI scePlayGoGetLanguageMask(int, std::uint64_t*);
+int APS5_VABI scePlayGoSetLanguageMask(int, std::uint64_t);
+int APS5_VABI scePlayGoTerminate(void);
 int APS5_VABI scePlayGoGetSupportedOptionalChunk(int, std::int32_t, PlayGoOptionalChunk*);
 int APS5_VABI scePlayGoGetOptionalChunk(int, std::int32_t, PlayGoOptionalChunk*);
 int APS5_VABI scePlayGoSetToDoList(int, const PlayGoToDo*, std::uint32_t);
@@ -103,6 +105,15 @@ static int CheckNoPlayGoFile(const char* root) {
     Require(scePlayGoGetLanguageMask(handle + 1, &mask) == badHandle);
     Require(scePlayGoGetLanguageMask(handle, nullptr) == badPointer);
     Require(scePlayGoGetLanguageMask(handle, &mask) == 0 && mask == ~0ull);
+    constexpr std::uint64_t oneLanguage = 1ull << 62;
+    Require(scePlayGoSetLanguageMask(handle + 1, oneLanguage) == badHandle);
+    Require(scePlayGoGetLanguageMask(handle, &mask) == 0 && mask == ~0ull);
+    Require(scePlayGoSetLanguageMask(handle, oneLanguage) == 0);
+    Require(scePlayGoGetLanguageMask(handle, &mask) == 0 && mask == oneLanguage);
+    Require(scePlayGoInitialize(nullptr) == badPointer);
+    Require(scePlayGoGetLanguageMask(handle, &mask) == 0 && mask == oneLanguage);
+    Require(scePlayGoSetLanguageMask(handle, 0) == 0);
+    Require(scePlayGoGetLanguageMask(handle, &mask) == 0 && mask == 0);
 
     for (const auto getOptionalChunk : {scePlayGoGetSupportedOptionalChunk, scePlayGoGetOptionalChunk}) {
         PlayGoOptionalChunk option{};
@@ -137,6 +148,11 @@ static int CheckNoPlayGoFile(const char* root) {
     std::uint32_t chunkCount = 0;
     Require(scePlayGoGetChunkId(handle, nullptr, 0, &chunkCount) == 0 && chunkCount == 1);
     Require(scePlayGoClose(handle + 1) == badHandle);
+    Require(scePlayGoClose(handle) == 0);
+    Require(scePlayGoTerminate() == 0);
+    Require(scePlayGoInitialize(&init) == 0);
+    Require(scePlayGoOpen(&handle, nullptr) == 0);
+    Require(scePlayGoGetLanguageMask(handle, &mask) == 0 && mask == ~0ull);
     Require(scePlayGoClose(handle) == 0);
     return 0;
 }
