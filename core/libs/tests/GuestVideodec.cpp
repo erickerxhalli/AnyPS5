@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -92,6 +93,7 @@ int APS5_VABI sceVideodecDecode(Ctrl*, const InputData*, FrameBuffer*, PictureIn
 int APS5_VABI sceVideodecDeleteDecoder(Ctrl*);
 int APS5_VABI sceVideodecFlush(Ctrl*, FrameBuffer*, PictureInfo*);
 int APS5_VABI sceVideodecReset(Ctrl*);
+int APS5_VABI sceVideodecQueryResourceInfo(const ConfigInfo*, ResourceInfo*);
 }
 
 namespace {
@@ -105,6 +107,7 @@ constexpr int ErrorAuSize = static_cast<int>(0x80C10009);
 constexpr int ErrorAuPointer = static_cast<int>(0x80C1000A);
 constexpr int ErrorFrameBufferSize = static_cast<int>(0x80C1000B);
 constexpr int ErrorFrameBufferPointer = static_cast<int>(0x80C1000C);
+constexpr int ErrorConfigInfo = static_cast<int>(0x80C1000E);
 constexpr int ErrorArgumentPointer = static_cast<int>(0x80C1000F);
 
 constexpr std::uint32_t Pitch = 64;
@@ -119,11 +122,12 @@ struct Session {
     Ctrl ctrl{sizeof(Ctrl)};
     std::vector<std::uint8_t> buffer;
 
-    Session() : buffer(FrameBytes) {
-        const ConfigInfo config{sizeof(ConfigInfo), 1, 100, 42, static_cast<std::int32_t>(Width),
-                                static_cast<std::int32_t>(CodedHeight), 4, 0};
-        const ResourceInfo resource{sizeof(ResourceInfo), 16u << 20u, nullptr, 16u << 20u, nullptr,
-                                    FrameBytes, 256};
+    Session()
+        : Session(ConfigInfo{sizeof(ConfigInfo), 1, 100, 42, static_cast<std::int32_t>(Width),
+                             static_cast<std::int32_t>(CodedHeight), 4, 0},
+                  ResourceInfo{sizeof(ResourceInfo), 16u << 20u, nullptr, 16u << 20u, nullptr, FrameBytes, 256}) {}
+
+    Session(const ConfigInfo& config, const ResourceInfo& resource) : buffer(resource.maxFrameBufferSize) {
         check(sceVideodecCreateDecoder(&config, &resource, &ctrl) == 0, "decoder creation failed");
         check(ctrl.handle != nullptr && ctrl.version == 1, "the control block was not filled");
     }
@@ -133,8 +137,7 @@ struct Session {
     FrameBuffer MakeTarget() { return FrameBuffer{sizeof(FrameBuffer), buffer.data(), buffer.size()}; }
 };
 
-void testDecode(const std::vector<std::vector<std::uint8_t>>& units, std::uint32_t cropTop, std::uint32_t cropBottom) {
-    Session session;
+void decodeAll(Session& session, const std::vector<std::vector<std::uint8_t>>& units, std::uint32_t cropTop, std::uint32_t cropBottom) {
     check(units.size() == PictureHashes.size(), "unexpected access unit count");
     std::vector<std::uint64_t> hashes;
     std::vector<std::uint64_t> timestamps;
@@ -170,6 +173,11 @@ void testDecode(const std::vector<std::vector<std::uint8_t>>& units, std::uint32
     }
 }
 
+void testDecode(const std::vector<std::vector<std::uint8_t>>& units, std::uint32_t cropTop, std::uint32_t cropBottom) {
+    Session session;
+    decodeAll(session, units, cropTop, cropBottom);
+}
+
 void testDecode() {
     testDecode(accessUnits(false), 0, (CodedHeight - Height) / 2);
 }
@@ -177,6 +185,51 @@ void testDecode() {
 void testDecodeCropped() {
     const auto stream = croppedStream();
     testDecode(accessUnits(stream.data(), stream.size(), false), 4, 4);
+}
+
+void testQuery() {
+    const ConfigInfo config{sizeof(ConfigInfo), 1, 100, 42, static_cast<std::int32_t>(Width),
+                            static_cast<std::int32_t>(Height), 4, 0};
+    ResourceInfo resource{};
+    std::memset(&resource, 0x5a, sizeof(resource));
+    resource.thisSize = sizeof(ResourceInfo);
+    const ResourceInfo untouched = resource;
+    const auto unchanged = [&] { return std::memcmp(&resource, &untouched, sizeof(resource)) == 0; };
+    check(sceVideodecQueryResourceInfo(nullptr, &resource) == ErrorArgumentPointer && unchanged(), "a null configuration was accepted");
+    check(sceVideodecQueryResourceInfo(&config, nullptr) == ErrorArgumentPointer, "a null resource was accepted");
+    ConfigInfo shortConfig = config;
+    shortConfig.thisSize = sizeof(ConfigInfo) - 8;
+    check(sceVideodecQueryResourceInfo(&shortConfig, &resource) == ErrorStructSize && unchanged(), "a short configuration was accepted");
+    ResourceInfo shortResource = resource;
+    shortResource.thisSize = sizeof(ResourceInfo) - 8;
+    const ResourceInfo shortUntouched = shortResource;
+    check(sceVideodecQueryResourceInfo(&config, &shortResource) == ErrorStructSize, "a short resource was accepted");
+    check(std::memcmp(&shortResource, &shortUntouched, sizeof(shortResource)) == 0, "a short resource was written");
+    ConfigInfo noWidth = config;
+    noWidth.maxFrameWidth = 0;
+    check(sceVideodecQueryResourceInfo(&noWidth, &resource) == ErrorConfigInfo && unchanged(), "a configuration without a width was accepted");
+    ConfigInfo noHeight = config;
+    noHeight.maxFrameHeight = 0;
+    check(sceVideodecQueryResourceInfo(&noHeight, &resource) == ErrorConfigInfo && unchanged(), "a configuration without a height was accepted");
+    check(sceVideodecQueryResourceInfo(&config, &resource) == 0, "the query failed");
+    check(resource.thisSize == sizeof(ResourceInfo), "the resource size was changed");
+    check(resource.cpuMemorySize == 1u << 20u && resource.cpuMemory == nullptr, "unexpected CPU memory");
+    check(resource.cpuGpuMemorySize == 1u << 20u && resource.cpuGpuMemory == nullptr, "unexpected CPU-GPU memory");
+    check(resource.maxFrameBufferSize == 256u * 64u * 3u / 2u, "unexpected frame buffer size");
+    check(resource.frameBufferAlignment == 256, "unexpected frame buffer alignment");
+}
+
+void testQueriedDecode() {
+    const ConfigInfo config{sizeof(ConfigInfo), 1, 100, 42, static_cast<std::int32_t>(Width),
+                            static_cast<std::int32_t>(Height), 4, 0};
+    ResourceInfo resource{sizeof(ResourceInfo)};
+    check(sceVideodecQueryResourceInfo(&config, &resource) == 0, "the query failed");
+    std::vector<std::uint8_t> cpuMemory(resource.cpuMemorySize);
+    std::vector<std::uint8_t> cpuGpuMemory(resource.cpuGpuMemorySize);
+    resource.cpuMemory = cpuMemory.data();
+    resource.cpuGpuMemory = cpuGpuMemory.data();
+    Session session(config, resource);
+    decodeAll(session, accessUnits(false), 0, (CodedHeight - Height) / 2);
 }
 
 void testErrors() {
@@ -238,6 +291,8 @@ int main() {
         testDecodeCropped();
         testErrors();
         testReset();
+        testQuery();
+        testQueriedDecode();
         std::puts("Videodec tests passed");
         return 0;
     } catch (const std::exception& error) {
