@@ -255,6 +255,14 @@ int RenamePath(const std::filesystem::path& source, const std::filesystem::path&
 
 extern "C" {
 
+void* APS5_VABI sceKernelGetProcParam(void);
+
+int APS5_VABI sceKernelGetCompiledSdkVersion(std::int32_t* version) {
+    if (version == nullptr) return static_cast<int>(0x80020016);
+    std::memcpy(version, static_cast<const std::byte*>(sceKernelGetProcParam()) + 0x10, sizeof(*version));
+    return 0;
+}
+
 int APS5_VABI fork_nid_postfix(void) {
     NotImplemented_nid_no_patch("fork: child processes");
     return -1;
